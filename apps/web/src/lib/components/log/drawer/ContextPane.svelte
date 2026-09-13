@@ -4,6 +4,7 @@
 
 	import ContextScopeBar from './context/ContextScopeBar.svelte';
 	import LogRow from '../LogRow.svelte';
+	import PanelError from '$lib/components/ui/PanelError.svelte';
 	import { ContextLoader, seedChipsFromIndex } from './context/context-loader.svelte';
 	import { getByPath } from '$lib/utils/get-by-path';
 	import {
@@ -176,10 +177,10 @@
 	});
 
 	/** Prepending newer rows shifts scrollHeight; restore visual scroll position. */
-	async function runLoadMoreAfterWith(l: ContextLoader): Promise<void> {
+	async function runLoadMoreAfterWith(l: ContextLoader, retry = false): Promise<void> {
 		if (!scrollEl) return;
 		const before = { top: scrollEl.scrollTop, height: scrollEl.scrollHeight };
-		await l.loadMoreAfter();
+		await l.loadMoreAfter(retry);
 		await tick();
 		if (!scrollEl) return;
 		const delta = scrollEl.scrollHeight - before.height;
@@ -235,6 +236,14 @@
 							<div class="flex items-center justify-center py-2">
 								<span class="loading loading-spinner loading-xs"></span>
 							</div>
+						{:else if l.errorMoreAfter}
+							<div class="px-3 py-2">
+								<PanelError
+									message="Couldn't load newer logs"
+									error={l.errorMoreAfter}
+									retry={() => runLoadMoreAfterWith(l, true)}
+								/>
+							</div>
 						{:else if l.noMoreAfter}
 							<p class="border-line text-subtle border-b border-dashed py-2 text-center text-xs">
 								No newer logs
@@ -259,6 +268,15 @@
 						{#if l.loadingMoreBefore}
 							<div class="flex items-center justify-center py-2">
 								<span class="loading loading-spinner loading-xs"></span>
+							</div>
+						{:else if l.errorMoreBefore}
+							<!-- pb-16 keeps the Retry button clear of the floating "Back to hit" pill, which sits in this same bottom-right corner. -->
+							<div class="px-3 pt-2 pb-16">
+								<PanelError
+									message="Couldn't load older logs"
+									error={l.errorMoreBefore}
+									retry={() => void l.loadMoreBefore(true)}
+								/>
 							</div>
 						{:else if l.noMoreBefore}
 							<p class="border-line text-subtle border-t border-dashed py-2 text-center text-xs">

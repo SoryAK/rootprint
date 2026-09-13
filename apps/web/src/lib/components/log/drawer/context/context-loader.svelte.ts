@@ -5,13 +5,17 @@ import { isAbortError } from '$lib/api/errors';
 import { getByPath } from '$lib/utils/get-by-path';
 import { escapeFilterValue } from 'api/query';
 import { normalizeHit } from '$lib/utils/normalize-hit';
-import type { ContextChip, ContextEntry, FieldConfig, LogHit } from '$lib/types';
+import type { ContextChip, ContextEntry, FieldConfig, LogHit, SearchInput } from '$lib/types';
 
 const PAGE_SIZE = 200;
-const WINDOW_HALF_SECONDS = 15 * 60;
 const WINDOW_SECONDS = 15 * 60;
 /** After this many consecutive fully-empty slides in one direction, stop walking. */
 const MAX_EMPTY_SLIDES = 3;
+const MAX_OFFSET = 10_000;
+
+type Dir = 'before' | 'after';
+/** Which way a direction's window bound travels as it slides away from the anchor. */
+const SIGN = { before: -1, after: 1 } as const;
 
 export function seedChipsFromIndex(
 	anchor: Record<string, unknown>,
@@ -48,16 +52,16 @@ export class ContextLoader {
 	noMoreBefore = $state(false);
 	noMoreAfter = $state(false);
 	error = $state<string | null>(null);
+	errorMoreBefore = $state<unknown>(null);
+	errorMoreAfter = $state<unknown>(null);
 	/** Bumps every time an initial fetch completes successfully. Pane watches this to scroll to the anchor row. */
 	initEpoch = $state(0);
 
 	// Sliding-window pagination: each direction owns a 15-min slice + offset that slides outward (resetting offset) once a slice returns < PAGE_SIZE rows, letting Quickwit prune to one time partition per request.
-	#beforeWindowEnd = 0; // upper bound of the current 'before' slice (seconds)
-	#beforeOffset = 0;
-	#beforeEmptySlides = 0;
-	#afterWindowStart = 0; // lower bound of the current 'after' slice (seconds)
-	#afterOffset = 0;
-	#afterEmptySlides = 0;
+	#win = {
+		before: { bound: 0, offset: 0, empty: 0 },
+		after: { bound: 0, offset: 0, empty: 0 }
+	};
 	#seenKeys = new Set<string>();
 	#abort: AbortController | null = null;
 	#fetchSeq = 0;
@@ -77,43 +81,47 @@ export class ContextLoader {
 		// NaN when the timestamp is missing/unparseable — #fetchInitial bails out then.
 		const parsed = parseISO(anchor.timestamp);
 		this.anchorTs = isValid(parsed) ? getUnixTime(parsed) : NaN;
-		this.#beforeWindowEnd = this.anchorTs;
-		this.#afterWindowStart = this.anchorTs;
+		this.#resetWindows();
 		this.#anchorKey = hitKey(anchor.raw);
 		this.chips = initialChips;
 	}
 
-	/** Post-page bookkeeping for the 'after' direction, given the pre-dedup row count: full page bumps offset; partial slides the slice outward; empty slides count toward MAX_EMPTY_SLIDES before declaring noMore. */
-	#advanceAfter(rowCount: number): void {
-		if (rowCount >= PAGE_SIZE) {
-			this.#afterOffset += PAGE_SIZE;
-			this.#afterEmptySlides = 0;
-			return;
-		}
-		this.#afterWindowStart += WINDOW_SECONDS;
-		this.#afterOffset = 0;
-		if (rowCount === 0) {
-			this.#afterEmptySlides += 1;
-			if (this.#afterEmptySlides >= MAX_EMPTY_SLIDES) this.noMoreAfter = true;
-		} else {
-			this.#afterEmptySlides = 0;
-		}
+	#resetWindows(): void {
+		this.#win.before = { bound: this.anchorTs, offset: 0, empty: 0 };
+		this.#win.after = { bound: this.anchorTs, offset: 0, empty: 0 };
 	}
 
-	#advanceBefore(rowCount: number): void {
-		if (rowCount >= PAGE_SIZE) {
-			this.#beforeOffset += PAGE_SIZE;
-			this.#beforeEmptySlides = 0;
+	#request(dir: Dir): SearchInput {
+		const { bound, offset } = this.#win[dir];
+		const desc = dir === 'before';
+		return {
+			indexId: this.indexId,
+			query: this.composedQuery,
+			limit: PAGE_SIZE,
+			offset,
+			sortDirection: desc ? 'desc' : 'asc',
+			startTs: desc ? bound - WINDOW_SECONDS : bound,
+			endTs: desc ? bound : bound + WINDOW_SECONDS
+		};
+	}
+
+	#advance(dir: Dir, rowCount: number): void {
+		const w = this.#win[dir];
+		if (rowCount >= PAGE_SIZE && w.offset + PAGE_SIZE <= MAX_OFFSET) {
+			w.offset += PAGE_SIZE;
+			w.empty = 0;
 			return;
 		}
-		this.#beforeWindowEnd -= WINDOW_SECONDS;
-		this.#beforeOffset = 0;
-		if (rowCount === 0) {
-			this.#beforeEmptySlides += 1;
-			if (this.#beforeEmptySlides >= MAX_EMPTY_SLIDES) this.noMoreBefore = true;
-		} else {
-			this.#beforeEmptySlides = 0;
+		w.bound += SIGN[dir] * WINDOW_SECONDS;
+		w.offset = 0;
+		if (rowCount > 0) {
+			w.empty = 0;
+			return;
 		}
+		w.empty += 1;
+		if (w.empty < MAX_EMPTY_SLIDES) return;
+		if (dir === 'before') this.noMoreBefore = true;
+		else this.noMoreAfter = true;
 	}
 
 	/** AND-joined chip query used by internal fetches; '*' when no chips. */
@@ -141,68 +149,54 @@ export class ContextLoader {
 	getSearchHandoff(): { query: string; start: number; end: number } {
 		return {
 			query: this.#buildChipClause(),
-			start: this.anchorTs - WINDOW_HALF_SECONDS,
-			end: this.anchorTs + WINDOW_HALF_SECONDS
+			start: this.anchorTs - WINDOW_SECONDS,
+			end: this.anchorTs + WINDOW_SECONDS
 		};
 	}
 
-	async loadMoreBefore(): Promise<void> {
+	async loadMoreBefore(retry = false): Promise<void> {
 		if (this.#abort === null) return; // disposed
 		if (this.loadingMoreBefore || this.noMoreBefore || this.loadingInitial) return;
+		if (this.errorMoreBefore && !retry) return;
 		this.loadingMoreBefore = true;
+		this.errorMoreBefore = null;
 		const thisSeq = this.#fetchSeq;
 		try {
-			const result = await searchLogs(
-				{
-					indexId: this.indexId,
-					query: this.composedQuery,
-					limit: PAGE_SIZE,
-					offset: this.#beforeOffset,
-					sortDirection: 'desc',
-					startTs: this.#beforeWindowEnd - WINDOW_SECONDS,
-					endTs: this.#beforeWindowEnd
-				},
-				this.#abort?.signal
-			);
+			const result = await searchLogs(this.#request('before'), this.#abort?.signal);
 			if (thisSeq !== this.#fetchSeq) return;
 			const fresh = this.#dedupe(result.rawHits);
 			// 'desc' returns newest-first; append at the end of the list (which is also newest-first).
 			this.entries = [...this.entries, ...this.#toEntries(fresh)];
-			this.#advanceBefore(result.rawHits.length);
+			this.#advance('before', result.rawHits.length);
 		} catch (e) {
 			if (isAbortError(e)) return;
+			if (thisSeq !== this.#fetchSeq) return;
+			this.errorMoreBefore = e;
 		} finally {
-			this.loadingMoreBefore = false;
+			if (thisSeq === this.#fetchSeq) this.loadingMoreBefore = false;
 		}
 	}
 
-	async loadMoreAfter(): Promise<void> {
+	async loadMoreAfter(retry = false): Promise<void> {
 		if (this.#abort === null) return; // disposed
 		if (this.loadingMoreAfter || this.noMoreAfter || this.loadingInitial) return;
+		if (this.errorMoreAfter && !retry) return;
 		this.loadingMoreAfter = true;
+		this.errorMoreAfter = null;
 		const thisSeq = this.#fetchSeq;
 		try {
-			const result = await searchLogs(
-				{
-					indexId: this.indexId,
-					query: this.composedQuery,
-					limit: PAGE_SIZE,
-					offset: this.#afterOffset,
-					sortDirection: 'asc',
-					startTs: this.#afterWindowStart,
-					endTs: this.#afterWindowStart + WINDOW_SECONDS
-				},
-				this.#abort?.signal
-			);
+			const result = await searchLogs(this.#request('after'), this.#abort?.signal);
 			if (thisSeq !== this.#fetchSeq) return;
 			const fresh = this.#dedupe(result.rawHits);
 			// 'asc' returns oldest-first; reverse so newest-first, then prepend to the list.
 			this.entries = [...this.#toEntries(fresh.toReversed()), ...this.entries];
-			this.#advanceAfter(result.rawHits.length);
+			this.#advance('after', result.rawHits.length);
 		} catch (e) {
 			if (isAbortError(e)) return;
+			if (thisSeq !== this.#fetchSeq) return;
+			this.errorMoreAfter = e;
 		} finally {
-			this.loadingMoreAfter = false;
+			if (thisSeq === this.#fetchSeq) this.loadingMoreAfter = false;
 		}
 	}
 
@@ -225,14 +219,11 @@ export class ContextLoader {
 		const thisSeq = ++this.#fetchSeq;
 		this.loadingInitial = true;
 		this.error = null;
+		this.errorMoreBefore = null;
+		this.errorMoreAfter = null;
 		this.entries = [];
 		this.#seenKeys = new Set<string>([this.#anchorKey]);
-		this.#beforeWindowEnd = this.anchorTs;
-		this.#beforeOffset = 0;
-		this.#beforeEmptySlides = 0;
-		this.#afterWindowStart = this.anchorTs;
-		this.#afterOffset = 0;
-		this.#afterEmptySlides = 0;
+		this.#resetWindows();
 		this.noMoreBefore = false;
 		this.noMoreAfter = false;
 		// Clear any leftover load-more flags from an aborted previous round.
@@ -241,30 +232,8 @@ export class ContextLoader {
 
 		try {
 			const [afterRes, beforeRes] = await Promise.all([
-				searchLogs(
-					{
-						indexId: this.indexId,
-						query: this.composedQuery,
-						limit: PAGE_SIZE,
-						offset: 0,
-						sortDirection: 'asc',
-						startTs: this.anchorTs,
-						endTs: this.anchorTs + WINDOW_SECONDS
-					},
-					this.#abort.signal
-				),
-				searchLogs(
-					{
-						indexId: this.indexId,
-						query: this.composedQuery,
-						limit: PAGE_SIZE,
-						offset: 0,
-						sortDirection: 'desc',
-						startTs: this.anchorTs - WINDOW_SECONDS,
-						endTs: this.anchorTs
-					},
-					this.#abort.signal
-				)
+				searchLogs(this.#request('after'), this.#abort.signal),
+				searchLogs(this.#request('before'), this.#abort.signal)
 			]);
 
 			if (thisSeq !== this.#fetchSeq) return;
@@ -281,13 +250,15 @@ export class ContextLoader {
 			this.entries = merged;
 			this.initEpoch++;
 
-			this.#advanceAfter(afterRes.rawHits.length);
-			this.#advanceBefore(beforeRes.rawHits.length);
+			this.#advance('after', afterRes.rawHits.length);
+			this.#advance('before', beforeRes.rawHits.length);
 		} catch (e) {
 			if (isAbortError(e)) return;
 			if (thisSeq !== this.#fetchSeq) return;
 			this.error = 'Failed to fetch log context. Check your connection and try again.';
 			this.entries = [this.#toEntry(this.anchor.raw, true)];
+			this.noMoreBefore = true;
+			this.noMoreAfter = true;
 			this.initEpoch++;
 		} finally {
 			if (thisSeq === this.#fetchSeq) this.loadingInitial = false;
