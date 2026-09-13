@@ -119,7 +119,9 @@ export class SearchStore {
 		];
 	});
 
-	activeFields = $state<string[]>([]);
+	// null = "using defaults"
+	#savedFields = $state<string[] | null>(null);
+	activeFields = $derived(this.#savedFields ?? this.#defaultDisplayFields());
 	lineWrap = $state(false);
 	displayMode = $state<DisplayMode>('table');
 
@@ -167,7 +169,7 @@ export class SearchStore {
 	#fieldsFetchedFor: string | null = null;
 	#activeFieldsGuard = new RequestGuard();
 	#activeFieldsFetchedFor: string | null = null;
-	#activeFieldsDefaultPending = false;
+	#prefsFor: string | null = null;
 	#confirmedPrefs: Preferences = { displayFields: null, lineWrap: false, displayMode: 'table' };
 	#prefSave: { timer: ReturnType<typeof setTimeout>; commit: () => void } | null = null;
 	#prefSaveSeq = 0;
@@ -548,10 +550,6 @@ export class SearchStore {
 			const cfg = await getIndexConfig(indexId);
 			if (!this.#configGuard.isCurrent(requestId)) return;
 			this.fieldConfig = cfg;
-			if (this.#activeFieldsDefaultPending) {
-				this.activeFields = this.#defaultDisplayFields();
-				this.#activeFieldsDefaultPending = false;
-			}
 		} catch (e) {
 			if (!this.#configGuard.isCurrent(requestId)) return;
 			this.configError = e instanceof Error ? e.message : 'Failed to load index config';
@@ -598,7 +596,6 @@ export class SearchStore {
 
 	async #loadActiveFields(indexId: string): Promise<void> {
 		const requestId = this.#activeFieldsGuard.next();
-		this.#activeFieldsDefaultPending = false;
 		const saveSeqAtStart = this.#prefSaveSeq;
 		// Display settings edited while the fetch was in flight (e.g. a saved
 		// view applying its columns) must win over the fetched prefs — the
@@ -610,7 +607,8 @@ export class SearchStore {
 			if (!this.#activeFieldsGuard.isCurrent(requestId)) return;
 			this.#confirmedPrefs = prefs;
 			if (editedMeanwhile()) return;
-			this.activeFields = this.#resolveDisplayFields(prefs.displayFields);
+			this.#prefsFor = indexId;
+			this.#savedFields = prefs.displayFields;
 			this.lineWrap = prefs.lineWrap;
 			this.displayMode = prefs.displayMode;
 		} catch (e) {
@@ -620,7 +618,8 @@ export class SearchStore {
 			this.#activeFieldsFetchedFor = null;
 			this.#confirmedPrefs = { displayFields: null, lineWrap: false, displayMode: 'table' };
 			if (!editedMeanwhile()) {
-				this.activeFields = this.#resolveDisplayFields(null);
+				this.#prefsFor = indexId;
+				this.#savedFields = null;
 				this.lineWrap = false;
 				this.displayMode = 'table';
 			}
@@ -629,8 +628,7 @@ export class SearchStore {
 	}
 
 	setActiveFields(next: string[]): void {
-		this.#activeFieldsDefaultPending = false;
-		this.activeFields = next;
+		this.#savedFields = next;
 		this.#savePrefs();
 	}
 
@@ -646,10 +644,10 @@ export class SearchStore {
 
 	#savePrefs(): void {
 		const indexId = this.selectedIndex;
-		if (indexId === null) return;
+		if (indexId === null || this.#prefsFor !== indexId) return;
 		const seq = ++this.#prefSaveSeq;
 		const snapshot: Preferences = {
-			displayFields: this.#activeFieldsDefaultPending ? null : this.activeFields,
+			displayFields: this.#savedFields,
 			lineWrap: this.lineWrap,
 			displayMode: this.displayMode
 		};
@@ -664,7 +662,7 @@ export class SearchStore {
 					if (this.#disposed) return;
 					// Superseded by a newer change (or index switch) — let that one win.
 					if (this.selectedIndex !== indexId || seq !== this.#prefSaveSeq) return;
-					this.activeFields = this.#resolveDisplayFields(this.#confirmedPrefs.displayFields);
+					this.#savedFields = this.#confirmedPrefs.displayFields;
 					this.lineWrap = this.#confirmedPrefs.lineWrap;
 					this.displayMode = this.#confirmedPrefs.displayMode;
 					toast.error(e instanceof Error ? e.message : 'Failed to save display preferences');
@@ -677,13 +675,6 @@ export class SearchStore {
 	#defaultDisplayFields(): string[] {
 		const messageField = this.fieldConfig?.messageField;
 		return messageField ? [messageField] : [];
-	}
-
-	#resolveDisplayFields(fields: string[] | null): string[] {
-		if (fields !== null) return fields;
-		const defaults = this.#defaultDisplayFields();
-		this.#activeFieldsDefaultPending = defaults.length === 0;
-		return defaults;
 	}
 
 	/** Aborts in-flight work and flushes any pending preference save. Installed as the
