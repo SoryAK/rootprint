@@ -1,10 +1,8 @@
-import { getUnixTime, isValid, parseISO } from 'date-fns';
-
 import { searchLogs } from '$lib/api/log-search';
 import { isAbortError } from '$lib/api/errors';
 import { getByPath } from '$lib/utils/get-by-path';
 import { escapeFilterValue } from 'api/query';
-import { normalizeHit } from '$lib/utils/normalize-hit';
+import { hitTimestampSeconds, normalizeHit } from '$lib/utils/normalize-hit';
 import type { ContextChip, ContextEntry, FieldConfig, LogHit, SearchInput } from '$lib/types';
 
 const PAGE_SIZE = 200;
@@ -77,10 +75,8 @@ export class ContextLoader {
 		this.anchor = anchor;
 		this.indexId = indexId;
 		this.fieldConfig = fieldConfig;
-		// anchor.timestamp is ISO; convert to seconds for Quickwit time bounds.
 		// NaN when the timestamp is missing/unparseable — #fetchInitial bails out then.
-		const parsed = parseISO(anchor.timestamp);
-		this.anchorTs = isValid(parsed) ? getUnixTime(parsed) : NaN;
+		this.anchorTs = hitTimestampSeconds(anchor.raw, fieldConfig);
 		this.#resetWindows();
 		this.#anchorKey = hitKey(anchor.raw);
 		this.chips = initialChips;
@@ -105,12 +101,23 @@ export class ContextLoader {
 		};
 	}
 
-	#advance(dir: Dir, rowCount: number): void {
+	#advance(dir: Dir, hits: Record<string, unknown>[]): void {
 		const w = this.#win[dir];
+		const rowCount = hits.length;
 		if (rowCount >= PAGE_SIZE && w.offset + PAGE_SIZE <= MAX_OFFSET) {
 			w.offset += PAGE_SIZE;
 			w.empty = 0;
 			return;
+		}
+		if (rowCount >= PAGE_SIZE) {
+			const resumed =
+				hitTimestampSeconds(hits[rowCount - 1], this.fieldConfig) + (dir === 'before' ? 1 : 0);
+			if (Number.isFinite(resumed) && resumed !== w.bound) {
+				w.bound = resumed;
+				w.offset = 0;
+				w.empty = 0;
+				return;
+			}
 		}
 		w.bound += SIGN[dir] * WINDOW_SECONDS;
 		w.offset = 0;
@@ -167,7 +174,7 @@ export class ContextLoader {
 			const fresh = this.#dedupe(result.rawHits);
 			// 'desc' returns newest-first; append at the end of the list (which is also newest-first).
 			this.entries = [...this.entries, ...this.#toEntries(fresh)];
-			this.#advance('before', result.rawHits.length);
+			this.#advance('before', result.rawHits);
 		} catch (e) {
 			if (isAbortError(e)) return;
 			if (thisSeq !== this.#fetchSeq) return;
@@ -190,7 +197,7 @@ export class ContextLoader {
 			const fresh = this.#dedupe(result.rawHits);
 			// 'asc' returns oldest-first; reverse so newest-first, then prepend to the list.
 			this.entries = [...this.#toEntries(fresh.toReversed()), ...this.entries];
-			this.#advance('after', result.rawHits.length);
+			this.#advance('after', result.rawHits);
 		} catch (e) {
 			if (isAbortError(e)) return;
 			if (thisSeq !== this.#fetchSeq) return;
@@ -209,11 +216,7 @@ export class ContextLoader {
 		this.#abort?.abort();
 		this.#abort = new AbortController();
 		if (!Number.isFinite(this.anchorTs)) {
-			this.error = 'This log has an invalid timestamp; surrounding context cannot be loaded.';
-			this.entries = [this.#toEntry(this.anchor.raw, true)];
-			this.noMoreBefore = true;
-			this.noMoreAfter = true;
-			this.initEpoch++;
+			this.#failInitial('This log has an invalid timestamp; surrounding context cannot be loaded.');
 			return;
 		}
 		const thisSeq = ++this.#fetchSeq;
@@ -231,38 +234,54 @@ export class ContextLoader {
 		this.loadingMoreAfter = false;
 
 		try {
-			const [afterRes, beforeRes] = await Promise.all([
+			const [afterRes, beforeRes] = await Promise.allSettled([
 				searchLogs(this.#request('after'), this.#abort.signal),
 				searchLogs(this.#request('before'), this.#abort.signal)
 			]);
 
 			if (thisSeq !== this.#fetchSeq) return;
 
-			const afterFresh = this.#dedupe(afterRes.rawHits);
-			const beforeFresh = this.#dedupe(beforeRes.rawHits);
+			const afterErr = afterRes.status === 'rejected' ? afterRes.reason : null;
+			const beforeErr = beforeRes.status === 'rejected' ? beforeRes.reason : null;
+			if (isAbortError(afterErr) || isAbortError(beforeErr)) return;
+			if (afterErr && beforeErr) {
+				this.#failInitial();
+				return;
+			}
+
+			const afterHits = afterRes.status === 'fulfilled' ? afterRes.value.rawHits : [];
+			const beforeHits = beforeRes.status === 'fulfilled' ? beforeRes.value.rawHits : [];
+			const afterFresh = this.#dedupe(afterHits);
+			const beforeFresh = this.#dedupe(beforeHits);
 
 			// Final order: newest first. 'asc' results reversed → newest; anchor in middle; 'desc' results → older.
-			const merged: ContextEntry[] = [
+			this.entries = [
 				...this.#toEntries(afterFresh.toReversed()),
 				this.#toEntry(this.anchor.raw, true),
 				...this.#toEntries(beforeFresh)
 			];
-			this.entries = merged;
 			this.initEpoch++;
 
-			this.#advance('after', afterRes.rawHits.length);
-			this.#advance('before', beforeRes.rawHits.length);
-		} catch (e) {
-			if (isAbortError(e)) return;
+			if (afterErr) this.errorMoreAfter = afterErr;
+			else this.#advance('after', afterHits);
+			if (beforeErr) this.errorMoreBefore = beforeErr;
+			else this.#advance('before', beforeHits);
+		} catch {
 			if (thisSeq !== this.#fetchSeq) return;
-			this.error = 'Failed to fetch log context. Check your connection and try again.';
-			this.entries = [this.#toEntry(this.anchor.raw, true)];
-			this.noMoreBefore = true;
-			this.noMoreAfter = true;
-			this.initEpoch++;
+			this.#failInitial();
 		} finally {
 			if (thisSeq === this.#fetchSeq) this.loadingInitial = false;
 		}
+	}
+
+	#failInitial(
+		message = 'Failed to fetch log context. Check your connection and try again.'
+	): void {
+		this.error = message;
+		this.entries = [this.#toEntry(this.anchor.raw, true)];
+		this.noMoreBefore = true;
+		this.noMoreAfter = true;
+		this.initEpoch++;
 	}
 
 	#dedupe(hits: Record<string, unknown>[]): Record<string, unknown>[] {
