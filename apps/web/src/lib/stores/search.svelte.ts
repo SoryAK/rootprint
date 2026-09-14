@@ -598,16 +598,19 @@ export class SearchStore {
 		const requestId = this.#activeFieldsGuard.next();
 		const saveSeqAtStart = this.#prefSaveSeq;
 		// Display settings edited while the fetch was in flight (e.g. a saved
-		// view applying its columns) must win over the fetched prefs — the
-		// scheduled save persists them. #confirmedPrefs still takes the server
+		// view applying its columns) must win over the fetched prefs — schedule
+		// their save once #prefsFor is bound. #confirmedPrefs still takes the server
 		// value so a failed save rolls back to the truth.
 		const editedMeanwhile = () => this.#prefSaveSeq !== saveSeqAtStart;
 		try {
 			const prefs = await getPreferences(indexId);
 			if (!this.#activeFieldsGuard.isCurrent(requestId)) return;
 			this.#confirmedPrefs = prefs;
-			if (editedMeanwhile()) return;
 			this.#prefsFor = indexId;
+			if (editedMeanwhile()) {
+				this.#savePrefs();
+				return;
+			}
 			this.#savedFields = prefs.displayFields;
 			this.lineWrap = prefs.lineWrap;
 			this.displayMode = prefs.displayMode;
@@ -617,8 +620,10 @@ export class SearchStore {
 			// Reset cache key so the effect retries on the next reactive run.
 			this.#activeFieldsFetchedFor = null;
 			this.#confirmedPrefs = { displayFields: null, lineWrap: false, displayMode: 'table' };
-			if (!editedMeanwhile()) {
-				this.#prefsFor = indexId;
+			this.#prefsFor = indexId;
+			if (editedMeanwhile()) {
+				this.#savePrefs();
+			} else {
 				this.#savedFields = null;
 				this.lineWrap = false;
 				this.displayMode = 'table';
@@ -644,8 +649,9 @@ export class SearchStore {
 
 	#savePrefs(): void {
 		const indexId = this.selectedIndex;
-		if (indexId === null || this.#prefsFor !== indexId) return;
+		if (indexId === null) return;
 		const seq = ++this.#prefSaveSeq;
+		if (this.#prefsFor !== indexId) return;
 		const snapshot: Preferences = {
 			displayFields: this.#savedFields,
 			lineWrap: this.lineWrap,
