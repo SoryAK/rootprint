@@ -171,7 +171,7 @@ export class SearchStore {
 	#activeFieldsFetchedFor: string | null = null;
 	#prefsFor: string | null = null;
 	#confirmedPrefs: Preferences = { displayFields: null, lineWrap: false, displayMode: 'table' };
-	#prefSave: { timer: ReturnType<typeof setTimeout>; commit: () => void } | null = null;
+	#prefSave: { timer: ReturnType<typeof setTimeout> | null; commit: () => void } | null = null;
 	#prefSaveSeq = 0;
 
 	constructor(opts: SearchStoreOptions) {
@@ -595,41 +595,34 @@ export class SearchStore {
 	}
 
 	async #loadActiveFields(indexId: string): Promise<void> {
+		this.#flushPrefSave();
 		const requestId = this.#activeFieldsGuard.next();
 		const saveSeqAtStart = this.#prefSaveSeq;
-		// Display settings edited while the fetch was in flight (e.g. a saved
-		// view applying its columns) must win over the fetched prefs — schedule
-		// their save once #prefsFor is bound. #confirmedPrefs still takes the server
-		// value so a failed save rolls back to the truth.
-		const editedMeanwhile = () => this.#prefSaveSeq !== saveSeqAtStart;
+		let prefs: Preferences;
 		try {
-			const prefs = await getPreferences(indexId);
-			if (!this.#activeFieldsGuard.isCurrent(requestId)) return;
-			this.#confirmedPrefs = prefs;
-			this.#prefsFor = indexId;
-			if (editedMeanwhile()) {
-				this.#savePrefs();
-				return;
-			}
-			this.#savedFields = prefs.displayFields;
-			this.lineWrap = prefs.lineWrap;
-			this.displayMode = prefs.displayMode;
+			prefs = await getPreferences(indexId);
 		} catch (e) {
 			if (this.#disposed) return;
 			if (!this.#activeFieldsGuard.isCurrent(requestId)) return;
 			// Reset cache key so the effect retries on the next reactive run.
 			this.#activeFieldsFetchedFor = null;
-			this.#confirmedPrefs = { displayFields: null, lineWrap: false, displayMode: 'table' };
-			this.#prefsFor = indexId;
-			if (editedMeanwhile()) {
-				this.#savePrefs();
-			} else {
-				this.#savedFields = null;
-				this.lineWrap = false;
-				this.displayMode = 'table';
-			}
+			prefs = { displayFields: null, lineWrap: false, displayMode: 'table' };
 			toast.error(e instanceof Error ? e.message : 'Failed to load display preferences');
 		}
+		if (this.#disposed || !this.#activeFieldsGuard.isCurrent(requestId)) return;
+		this.#confirmedPrefs = prefs;
+		this.#prefsFor = indexId;
+		// Local edits win, but retain the server value for rollback if their save fails.
+		if (this.#prefSaveSeq !== saveSeqAtStart) {
+			const pending = this.#prefSave;
+			if (pending !== null && pending.timer === null) {
+				pending.timer = setTimeout(pending.commit, PREF_SAVE_DEBOUNCE_MS);
+			}
+			return;
+		}
+		this.#savedFields = prefs.displayFields;
+		this.lineWrap = prefs.lineWrap;
+		this.displayMode = prefs.displayMode;
 	}
 
 	setActiveFields(next: string[]): void {
@@ -651,7 +644,6 @@ export class SearchStore {
 		const indexId = this.selectedIndex;
 		if (indexId === null) return;
 		const seq = ++this.#prefSaveSeq;
-		if (this.#prefsFor !== indexId) return;
 		const snapshot: Preferences = {
 			displayFields: this.#savedFields,
 			lineWrap: this.lineWrap,
@@ -674,8 +666,19 @@ export class SearchStore {
 					toast.error(e instanceof Error ? e.message : 'Failed to save display preferences');
 				});
 		};
-		if (this.#prefSave !== null) clearTimeout(this.#prefSave.timer);
-		this.#prefSave = { timer: setTimeout(commit, PREF_SAVE_DEBOUNCE_MS), commit };
+		if (this.#prefSave?.timer != null) clearTimeout(this.#prefSave.timer);
+		this.#prefSave = {
+			// Keep the snapshot flushable while the initial preferences are still loading.
+			timer: this.#prefsFor === indexId ? setTimeout(commit, PREF_SAVE_DEBOUNCE_MS) : null,
+			commit
+		};
+	}
+
+	#flushPrefSave(): void {
+		const pending = this.#prefSave;
+		if (pending === null) return;
+		if (pending.timer !== null) clearTimeout(pending.timer);
+		pending.commit();
 	}
 
 	#defaultDisplayFields(): string[] {
@@ -690,11 +693,7 @@ export class SearchStore {
 		this.#disposed = true;
 		this.#searchAbort?.abort();
 		this.#histogramAbort?.abort();
-		const pending = this.#prefSave;
-		if (pending !== null) {
-			clearTimeout(pending.timer);
-			pending.commit();
-		}
+		this.#flushPrefSave();
 	}
 
 	#computeLevelTotals(buckets: HistogramBucket[]): LevelBucket[] {
