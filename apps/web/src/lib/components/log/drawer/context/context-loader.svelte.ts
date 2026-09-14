@@ -12,8 +12,16 @@ const MAX_EMPTY_SLIDES = 3;
 const MAX_OFFSET = 10_000;
 
 type Dir = 'before' | 'after';
-/** Which way a direction's window bound travels as it slides away from the anchor. */
 const SIGN = { before: -1, after: 1 } as const;
+
+function createDirectionState(): {
+	loading: boolean;
+	noMore: boolean;
+	limited: boolean;
+	error: unknown;
+} {
+	return { loading: false, noMore: false, limited: false, error: null };
+}
 
 export function seedChipsFromIndex(
 	anchor: Record<string, unknown>,
@@ -45,20 +53,16 @@ export class ContextLoader {
 	entries = $state.raw<ContextEntry[]>([]);
 
 	loadingInitial = $state(false);
-	loadingMoreBefore = $state(false);
-	loadingMoreAfter = $state(false);
-	noMoreBefore = $state(false);
-	noMoreAfter = $state(false);
+	before = $state(createDirectionState());
+	after = $state(createDirectionState());
 	error = $state<string | null>(null);
-	errorMoreBefore = $state<unknown>(null);
-	errorMoreAfter = $state<unknown>(null);
-	/** Bumps every time an initial fetch completes successfully. Pane watches this to scroll to the anchor row. */
+	/** Pane watches this to scroll to the anchor after initial results or a failure. */
 	initEpoch = $state(0);
 
 	// Sliding-window pagination: each direction owns a 15-min slice + offset that slides outward (resetting offset) once a slice returns < PAGE_SIZE rows, letting Quickwit prune to one time partition per request.
 	#win = {
-		before: { bound: 0, offset: 0, empty: 0 },
-		after: { bound: 0, offset: 0, empty: 0 }
+		before: { bound: 0, offset: 0, empty: 0, boundaryTs: NaN, boundaryCount: 0 },
+		after: { bound: 0, offset: 0, empty: 0, boundaryTs: NaN, boundaryCount: 0 }
 	};
 	#seenKeys = new Set<string>();
 	#abort: AbortController | null = null;
@@ -83,8 +87,15 @@ export class ContextLoader {
 	}
 
 	#resetWindows(): void {
-		this.#win.before = { bound: this.anchorTs, offset: 0, empty: 0 };
-		this.#win.after = { bound: this.anchorTs, offset: 0, empty: 0 };
+		for (const dir of ['before', 'after'] as const) {
+			this.#win[dir] = {
+				bound: this.anchorTs,
+				offset: 0,
+				empty: 0,
+				boundaryTs: NaN,
+				boundaryCount: 0
+			};
+		}
 	}
 
 	#request(dir: Dir): SearchInput {
@@ -104,31 +115,49 @@ export class ContextLoader {
 	#advance(dir: Dir, hits: Record<string, unknown>[]): void {
 		const w = this.#win[dir];
 		const rowCount = hits.length;
-		if (rowCount >= PAGE_SIZE && w.offset + PAGE_SIZE <= MAX_OFFSET) {
-			w.offset += PAGE_SIZE;
-			w.empty = 0;
-			return;
-		}
 		if (rowCount >= PAGE_SIZE) {
-			const resumed =
-				hitTimestampSeconds(hits[rowCount - 1], this.fieldConfig) + (dir === 'before' ? 1 : 0);
-			if (Number.isFinite(resumed) && resumed !== w.bound) {
-				w.bound = resumed;
-				w.offset = 0;
-				w.empty = 0;
+			const boundaryTs = hitTimestampSeconds(hits[rowCount - 1], this.fieldConfig);
+			let boundaryCount = 1;
+			for (let i = rowCount - 2; i >= 0; i--) {
+				if (hitTimestampSeconds(hits[i], this.fieldConfig) !== boundaryTs) break;
+				boundaryCount++;
+			}
+			// A resumed window includes this whole second; retain its consumed offset to avoid replaying it.
+			w.boundaryCount =
+				boundaryCount === rowCount && boundaryTs === w.boundaryTs
+					? w.boundaryCount + boundaryCount
+					: boundaryCount;
+			w.boundaryTs = boundaryTs;
+			w.empty = 0;
+			if (w.offset + PAGE_SIZE <= MAX_OFFSET) {
+				w.offset += PAGE_SIZE;
 				return;
 			}
+			const resumed = boundaryTs + (dir === 'before' ? 1 : 0);
+			if (
+				Number.isFinite(resumed) &&
+				SIGN[dir] * (resumed - w.bound) > 0 &&
+				w.boundaryCount <= MAX_OFFSET
+			) {
+				w.bound = resumed;
+				w.offset = w.boundaryCount;
+			} else {
+				// A saturated second cannot be traversed safely without a tie-aware cursor.
+				this[dir].limited = true;
+			}
+			return;
 		}
 		w.bound += SIGN[dir] * WINDOW_SECONDS;
 		w.offset = 0;
+		w.boundaryTs = NaN;
+		w.boundaryCount = 0;
 		if (rowCount > 0) {
 			w.empty = 0;
 			return;
 		}
 		w.empty += 1;
 		if (w.empty < MAX_EMPTY_SLIDES) return;
-		if (dir === 'before') this.noMoreBefore = true;
-		else this.noMoreAfter = true;
+		this[dir].noMore = true;
 	}
 
 	/** AND-joined chip query used by internal fetches; '*' when no chips. */
@@ -161,53 +190,44 @@ export class ContextLoader {
 		};
 	}
 
-	async loadMoreBefore(retry = false): Promise<void> {
-		if (this.#abort === null) return; // disposed
-		if (this.loadingMoreBefore || this.noMoreBefore || this.loadingInitial) return;
-		if (this.errorMoreBefore && !retry) return;
-		this.loadingMoreBefore = true;
-		this.errorMoreBefore = null;
-		const thisSeq = this.#fetchSeq;
-		try {
-			const result = await searchLogs(this.#request('before'), this.#abort?.signal);
-			if (thisSeq !== this.#fetchSeq) return;
-			const fresh = this.#dedupe(result.rawHits);
-			// 'desc' returns newest-first; append at the end of the list (which is also newest-first).
-			this.entries = [...this.entries, ...this.#toEntries(fresh)];
-			this.#advance('before', result.rawHits);
-		} catch (e) {
-			if (isAbortError(e)) return;
-			if (thisSeq !== this.#fetchSeq) return;
-			this.errorMoreBefore = e;
-		} finally {
-			if (thisSeq === this.#fetchSeq) this.loadingMoreBefore = false;
-		}
+	loadMoreBefore(retry = false): Promise<void> {
+		return this.#loadMore('before', retry);
 	}
 
-	async loadMoreAfter(retry = false): Promise<void> {
-		if (this.#abort === null) return; // disposed
-		if (this.loadingMoreAfter || this.noMoreAfter || this.loadingInitial) return;
-		if (this.errorMoreAfter && !retry) return;
-		this.loadingMoreAfter = true;
-		this.errorMoreAfter = null;
+	loadMoreAfter(retry = false): Promise<void> {
+		return this.#loadMore('after', retry);
+	}
+
+	async #loadMore(dir: Dir, retry: boolean): Promise<void> {
+		if (this.#abort === null || this.loadingInitial || this.error) return;
+		const state = this[dir];
+		if (state.loading || state.noMore || state.limited) return;
+		if (state.error && !retry) return;
+		state.loading = true;
+		state.error = null;
 		const thisSeq = this.#fetchSeq;
 		try {
-			const result = await searchLogs(this.#request('after'), this.#abort?.signal);
+			const result = await searchLogs(this.#request(dir), this.#abort.signal);
 			if (thisSeq !== this.#fetchSeq) return;
 			const fresh = this.#dedupe(result.rawHits);
-			// 'asc' returns oldest-first; reverse so newest-first, then prepend to the list.
-			this.entries = [...this.#toEntries(fresh.toReversed()), ...this.entries];
-			this.#advance('after', result.rawHits);
+			if (fresh.length > 0) {
+				this.entries =
+					dir === 'before'
+						? [...this.entries, ...this.#toEntries(fresh)]
+						: [...this.#toEntries(fresh.toReversed()), ...this.entries];
+			}
+			this.#advance(dir, result.rawHits);
 		} catch (e) {
 			if (isAbortError(e)) return;
 			if (thisSeq !== this.#fetchSeq) return;
-			this.errorMoreAfter = e;
+			state.error = e;
 		} finally {
-			if (thisSeq === this.#fetchSeq) this.loadingMoreAfter = false;
+			if (thisSeq === this.#fetchSeq) state.loading = false;
 		}
 	}
 
 	dispose(): void {
+		this.#fetchSeq++;
 		this.#abort?.abort();
 		this.#abort = null;
 	}
@@ -215,23 +235,18 @@ export class ContextLoader {
 	async #fetchInitial(): Promise<void> {
 		this.#abort?.abort();
 		this.#abort = new AbortController();
+		const thisSeq = ++this.#fetchSeq;
+		this.before = createDirectionState();
+		this.after = createDirectionState();
 		if (!Number.isFinite(this.anchorTs)) {
 			this.#failInitial('This log has an invalid timestamp; surrounding context cannot be loaded.');
 			return;
 		}
-		const thisSeq = ++this.#fetchSeq;
 		this.loadingInitial = true;
 		this.error = null;
-		this.errorMoreBefore = null;
-		this.errorMoreAfter = null;
 		this.entries = [];
 		this.#seenKeys = new Set<string>([this.#anchorKey]);
 		this.#resetWindows();
-		this.noMoreBefore = false;
-		this.noMoreAfter = false;
-		// Clear any leftover load-more flags from an aborted previous round.
-		this.loadingMoreBefore = false;
-		this.loadingMoreAfter = false;
 
 		try {
 			const [afterRes, beforeRes] = await Promise.allSettled([
@@ -262,9 +277,9 @@ export class ContextLoader {
 			];
 			this.initEpoch++;
 
-			if (afterErr) this.errorMoreAfter = afterErr;
+			if (afterErr) this.after.error = afterErr;
 			else this.#advance('after', afterHits);
-			if (beforeErr) this.errorMoreBefore = beforeErr;
+			if (beforeErr) this.before.error = beforeErr;
 			else this.#advance('before', beforeHits);
 		} catch {
 			if (thisSeq !== this.#fetchSeq) return;
@@ -279,8 +294,6 @@ export class ContextLoader {
 	): void {
 		this.error = message;
 		this.entries = [this.#toEntry(this.anchor.raw, true)];
-		this.noMoreBefore = true;
-		this.noMoreAfter = true;
 		this.initEpoch++;
 	}
 

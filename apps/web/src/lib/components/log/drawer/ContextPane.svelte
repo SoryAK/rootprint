@@ -220,7 +220,13 @@
 		/>
 
 		{#if l.error}
-			<p class="text-warning-ink px-3 py-2 text-sm">{l.error}</p>
+			{#if Number.isFinite(l.anchorTs)}
+				<div class="px-3 py-2">
+					<PanelError message={l.error} retry={() => void l.init()} />
+				</div>
+			{:else}
+				<p class="text-warning-ink px-3 py-2 text-sm">{l.error}</p>
+			{/if}
 		{/if}
 
 		{#if l.loadingInitial}
@@ -232,19 +238,23 @@
 				<div bind:this={scrollEl} class="absolute inset-0 overflow-x-auto overflow-y-auto">
 					<!-- Top sentinel: newer side -->
 					<div bind:this={topSentinel}>
-						{#if l.loadingMoreAfter}
+						{#if l.after.loading}
 							<div class="flex items-center justify-center py-2">
 								<span class="loading loading-spinner loading-xs"></span>
 							</div>
-						{:else if l.errorMoreAfter}
+						{:else if l.after.error}
 							<div class="px-3 py-2">
 								<PanelError
 									message="Couldn't load newer logs"
-									error={l.errorMoreAfter}
+									error={l.after.error}
 									retry={() => runLoadMoreAfterWith(l, true)}
 								/>
 							</div>
-						{:else if l.noMoreAfter}
+						{:else if l.after.limited}
+							<p class="text-warning-ink px-3 py-2 text-center text-xs">
+								Newer context reached the pagination limit. Narrow the scope to see more logs.
+							</p>
+						{:else if l.after.noMore && !l.error}
 							<p class="border-line text-subtle border-b border-dashed py-2 text-center text-xs">
 								No newer logs
 							</p>
@@ -265,20 +275,24 @@
 
 					<!-- Bottom sentinel: older side -->
 					<div bind:this={bottomSentinel}>
-						{#if l.loadingMoreBefore}
+						{#if l.before.loading}
 							<div class="flex items-center justify-center py-2">
 								<span class="loading loading-spinner loading-xs"></span>
 							</div>
-						{:else if l.errorMoreBefore}
+						{:else if l.before.error}
 							<!-- pb-16 keeps the Retry button clear of the floating "Back to hit" pill, which sits in this same bottom-right corner. -->
 							<div class="px-3 pt-2 pb-16">
 								<PanelError
 									message="Couldn't load older logs"
-									error={l.errorMoreBefore}
+									error={l.before.error}
 									retry={() => void l.loadMoreBefore(true)}
 								/>
 							</div>
-						{:else if l.noMoreBefore}
+						{:else if l.before.limited}
+							<p class="text-warning-ink px-3 pt-2 pb-16 text-center text-xs">
+								Older context reached the pagination limit. Narrow the scope to see more logs.
+							</p>
+						{:else if l.before.noMore && !l.error}
 							<p class="border-line text-subtle border-t border-dashed py-2 text-center text-xs">
 								No older logs
 							</p>
