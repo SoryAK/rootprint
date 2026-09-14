@@ -169,9 +169,8 @@ export class SearchStore {
 	#fieldsFetchedFor: string | null = null;
 	#activeFieldsGuard = new RequestGuard();
 	#activeFieldsFetchedFor: string | null = null;
-	#prefsFor: string | null = null;
 	#confirmedPrefs: Preferences = { displayFields: null, lineWrap: false, displayMode: 'table' };
-	#prefSave: { timer: ReturnType<typeof setTimeout> | null; commit: () => void } | null = null;
+	#prefSave: { timer: ReturnType<typeof setTimeout>; commit: () => void } | null = null;
 	#prefSaveSeq = 0;
 
 	constructor(opts: SearchStoreOptions) {
@@ -595,7 +594,6 @@ export class SearchStore {
 	}
 
 	async #loadActiveFields(indexId: string): Promise<void> {
-		this.#flushPrefSave();
 		const requestId = this.#activeFieldsGuard.next();
 		const saveSeqAtStart = this.#prefSaveSeq;
 		let prefs: Preferences;
@@ -611,15 +609,8 @@ export class SearchStore {
 		}
 		if (this.#disposed || !this.#activeFieldsGuard.isCurrent(requestId)) return;
 		this.#confirmedPrefs = prefs;
-		this.#prefsFor = indexId;
 		// Local edits win, but retain the server value for rollback if their save fails.
-		if (this.#prefSaveSeq !== saveSeqAtStart) {
-			const pending = this.#prefSave;
-			if (pending !== null && pending.timer === null) {
-				pending.timer = setTimeout(pending.commit, PREF_SAVE_DEBOUNCE_MS);
-			}
-			return;
-		}
+		if (this.#prefSaveSeq !== saveSeqAtStart) return;
 		this.#savedFields = prefs.displayFields;
 		this.lineWrap = prefs.lineWrap;
 		this.displayMode = prefs.displayMode;
@@ -666,19 +657,8 @@ export class SearchStore {
 					toast.error(e instanceof Error ? e.message : 'Failed to save display preferences');
 				});
 		};
-		if (this.#prefSave?.timer != null) clearTimeout(this.#prefSave.timer);
-		this.#prefSave = {
-			// Keep the snapshot flushable while the initial preferences are still loading.
-			timer: this.#prefsFor === indexId ? setTimeout(commit, PREF_SAVE_DEBOUNCE_MS) : null,
-			commit
-		};
-	}
-
-	#flushPrefSave(): void {
-		const pending = this.#prefSave;
-		if (pending === null) return;
-		if (pending.timer !== null) clearTimeout(pending.timer);
-		pending.commit();
+		if (this.#prefSave !== null) clearTimeout(this.#prefSave.timer);
+		this.#prefSave = { timer: setTimeout(commit, PREF_SAVE_DEBOUNCE_MS), commit };
 	}
 
 	#defaultDisplayFields(): string[] {
@@ -693,7 +673,11 @@ export class SearchStore {
 		this.#disposed = true;
 		this.#searchAbort?.abort();
 		this.#histogramAbort?.abort();
-		this.#flushPrefSave();
+		const pending = this.#prefSave;
+		if (pending !== null) {
+			clearTimeout(pending.timer);
+			pending.commit();
+		}
 	}
 
 	#computeLevelTotals(buckets: HistogramBucket[]): LevelBucket[] {
