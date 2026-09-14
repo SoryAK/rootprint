@@ -129,7 +129,7 @@
 					if (entry.target === topSentinel) {
 						void runLoadMoreAfterWith(localLoader);
 					} else if (entry.target === bottomSentinel) {
-						void localLoader.loadMoreBefore();
+						void localLoader.loadMore('before');
 					}
 				}
 			},
@@ -180,7 +180,7 @@
 	async function runLoadMoreAfterWith(l: ContextLoader, retry = false): Promise<void> {
 		if (!scrollEl) return;
 		const before = { top: scrollEl.scrollTop, height: scrollEl.scrollHeight };
-		await l.loadMoreAfter(retry);
+		await l.loadMore('after', retry);
 		await tick();
 		if (!scrollEl) return;
 		const delta = scrollEl.scrollHeight - before.height;
@@ -220,13 +220,7 @@
 		/>
 
 		{#if l.error}
-			{#if Number.isFinite(l.anchorTs)}
-				<div class="px-3 py-2">
-					<PanelError message={l.error} retry={() => void l.init()} />
-				</div>
-			{:else}
-				<p class="text-warning-ink px-3 py-2 text-sm">{l.error}</p>
-			{/if}
+			<p class="text-warning-ink px-3 py-2 text-sm">{l.error}</p>
 		{/if}
 
 		{#if l.loadingInitial}
@@ -254,7 +248,7 @@
 							<p class="text-warning-ink px-3 py-2 text-center text-xs">
 								Newer context reached the pagination limit. Narrow the scope to see more logs.
 							</p>
-						{:else if l.after.noMore && !l.error}
+						{:else if l.after.noMore}
 							<p class="border-line text-subtle border-b border-dashed py-2 text-center text-xs">
 								No newer logs
 							</p>
@@ -285,14 +279,14 @@
 								<PanelError
 									message="Couldn't load older logs"
 									error={l.before.error}
-									retry={() => void l.loadMoreBefore(true)}
+									retry={() => void l.loadMore('before', true)}
 								/>
 							</div>
 						{:else if l.before.limited}
 							<p class="text-warning-ink px-3 pt-2 pb-16 text-center text-xs">
 								Older context reached the pagination limit. Narrow the scope to see more logs.
 							</p>
-						{:else if l.before.noMore && !l.error}
+						{:else if l.before.noMore}
 							<p class="border-line text-subtle border-t border-dashed py-2 text-center text-xs">
 								No older logs
 							</p>
