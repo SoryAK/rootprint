@@ -60,12 +60,6 @@
 
 	$effect(() => {
 		const id = selectedIndex;
-		if (!id) return;
-		writeJSON(storageKey(id), [...openFields]);
-	});
-
-	$effect(() => {
-		const id = selectedIndex;
 		const saved = new Set(id ? readStringArray(collapsedStorageKey(id)) : []);
 		groupsCollapsed = {
 			pinned: saved.has('pinned'),
@@ -74,20 +68,12 @@
 		};
 	});
 
-	$effect(() => {
-		const id = selectedIndex;
-		if (!id) return;
-		const collapsed = Object.entries(groupsCollapsed)
-			.filter(([, isCollapsed]) => isCollapsed)
-			.map(([key]) => key);
-		writeJSON(collapsedStorageKey(id), collapsed);
-	});
-
 	function toggleOpen(name: string): void {
 		const next = new Set(openFields);
 		if (next.has(name)) next.delete(name);
 		else next.add(name);
 		openFields = next;
+		if (selectedIndex) writeJSON(storageKey(selectedIndex), [...next]);
 	}
 
 	function togglePin(name: string): void {
@@ -319,6 +305,11 @@
 
 	function toggleGroup(key: CollapsibleKey) {
 		groupsCollapsed[key] = !groupsCollapsed[key];
+		if (!selectedIndex) return;
+		const collapsed = Object.entries(groupsCollapsed)
+			.filter(([, isCollapsed]) => isCollapsed)
+			.map(([name]) => name);
+		writeJSON(collapsedStorageKey(selectedIndex), collapsed);
 	}
 </script>
 
