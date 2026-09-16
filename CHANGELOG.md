@@ -2,6 +2,12 @@
 
 All notable changes to Rootprint are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Optional fold mode on the log explorer: consecutive rows that match on every visible column except timestamp collapse behind a count and time-span badge (`fold=1` in the URL). Display-only; histogram, hit count, and the search query are unchanged.
+
 ## [0.4.3] - 2026-09-10
 
 ### ⚠️ Breaking

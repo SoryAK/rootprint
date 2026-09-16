@@ -105,6 +105,8 @@ export function buildQueryUrl(current: URLSearchParams, partial: Partial<ParsedQ
 	const prev = deserialize(current);
 	const merged: ParsedQuery = { ...prev, ...partial };
 	const params = serialize(merged);
+	// `fold` is display-only and is not part of ParsedQuery; keep it across navigations.
+	if (current.get('fold') === '1') params.set('fold', '1');
 	const str = params.toString();
 	return str ? `?${str}` : '?';
 }

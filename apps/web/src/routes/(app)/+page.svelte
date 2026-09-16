@@ -194,7 +194,7 @@
 						</div>
 					{:else}
 						<VirtualLogList
-							logs={store.logs}
+							rows={store.rows}
 							activeFields={store.activeFields}
 							{gridTemplate}
 							fieldConfig={store.fieldConfig}
@@ -205,6 +205,7 @@
 							listEnd={store.listEnd}
 							onToggleSort={() => store.toggleSort()}
 							onRowClick={openRow}
+							onToggleFold={(id) => store.toggleFold(id)}
 						/>
 					{/if}
 				</div>

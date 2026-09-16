@@ -5,13 +5,14 @@
 	import LogRow from './LogRow.svelte';
 	import InlineLogRow from './InlineLogRow.svelte';
 	import type { FieldConfig, LogHit, SortDirection } from '$lib/types';
+	import type { LogListRow } from '$lib/utils/fold-hits';
 	import type { DisplayMode } from 'api/types';
 
 	const ROW_ESTIMATE = 25;
 	const OVERSCAN = 8;
 
 	let {
-		logs,
+		rows,
 		activeFields,
 		gridTemplate,
 		fieldConfig,
@@ -21,9 +22,10 @@
 		displayMode = 'table',
 		listEnd = 'more',
 		onToggleSort = () => {},
-		onRowClick = () => {}
+		onRowClick = () => {},
+		onToggleFold = () => {}
 	}: {
-		logs: LogHit[];
+		rows: LogListRow[];
 		activeFields: string[];
 		gridTemplate: string;
 		fieldConfig: FieldConfig | null;
@@ -34,13 +36,14 @@
 		listEnd?: 'more' | 'end' | 'capped';
 		onToggleSort?: () => void;
 		onRowClick?: (hit: LogHit) => void;
+		onToggleFold?: (id: string) => void;
 	} = $props();
 
 	let headerEl = $state<HTMLElement | null>(null);
 	let scrollMargin = $state(0);
 
 	const virtualizer = createVirtualizer<HTMLElement, HTMLElement>({
-		count: logs.length,
+		count: rows.length,
 		getScrollElement: () => viewport,
 		estimateSize: () => ROW_ESTIMATE,
 		overscan: OVERSCAN,
@@ -51,6 +54,11 @@
 
 	function measure(node: HTMLElement) {
 		get(virtualizer).measureElement(node);
+	}
+
+	function rowKey(row: LogListRow | undefined, index: number): string {
+		if (!row) return String(index);
+		return row.kind === 'fold' ? `fold:${row.id}` : `hit:${row.hit.key}`;
 	}
 
 	$effect(() => {
@@ -65,7 +73,7 @@
 	});
 
 	$effect(() => {
-		const count = logs.length;
+		const count = rows.length;
 		const margin = scrollMargin;
 		const el = viewport;
 		const v = get(virtualizer);
@@ -91,8 +99,9 @@
 		/>
 	{/if}
 	<div class="relative w-full" style="height: {$virtualizer.getTotalSize()}px;">
-		{#each $virtualizer.getVirtualItems() as item (logs[item.index]?.key ?? item.index)}
-			{#if logs[item.index]}
+		{#each $virtualizer.getVirtualItems() as item (rowKey(rows[item.index], item.index))}
+			{#if rows[item.index]}
+				{@const row = rows[item.index]}
 				<div
 					{@attach measure}
 					data-index={item.index}
@@ -101,19 +110,27 @@
 				>
 					{#if displayMode === 'inline'}
 						<InlineLogRow
-							hit={logs[item.index]}
+							hit={row.hit}
 							columns={activeFields}
 							{lineWrap}
-							onActivate={() => onRowClick(logs[item.index])}
+							foldCount={row.kind === 'fold' ? row.count : null}
+							foldExpanded={row.kind === 'fold' ? row.expanded : false}
+							foldEndTimestamp={row.kind === 'fold' ? row.endHit.timestamp : null}
+							onActivate={() => (row.kind === 'fold' ? onToggleFold(row.id) : onRowClick(row.hit))}
+							onToggleFold={() => row.kind === 'fold' && onToggleFold(row.id)}
 						/>
 					{:else}
 						<LogRow
-							hit={logs[item.index]}
+							hit={row.hit}
 							columns={activeFields}
 							{gridTemplate}
 							{messageField}
 							{lineWrap}
-							onActivate={() => onRowClick(logs[item.index])}
+							foldCount={row.kind === 'fold' ? row.count : null}
+							foldExpanded={row.kind === 'fold' ? row.expanded : false}
+							foldEndTimestamp={row.kind === 'fold' ? row.endHit.timestamp : null}
+							onActivate={() => (row.kind === 'fold' ? onToggleFold(row.id) : onRowClick(row.hit))}
+							onToggleFold={() => row.kind === 'fold' && onToggleFold(row.id)}
 						/>
 					{/if}
 				</div>

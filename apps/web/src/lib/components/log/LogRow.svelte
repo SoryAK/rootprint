@@ -5,6 +5,7 @@
 	import { getByPath } from '$lib/utils/get-by-path';
 	import { formatCell } from '$lib/utils/column-width';
 	import { rowActivate } from '$lib/attachments/row-activate';
+	import FoldBadge from './FoldBadge.svelte';
 
 	let {
 		hit,
@@ -13,7 +14,11 @@
 		messageField,
 		lineWrap = false,
 		isAnchor = false,
-		onActivate = () => {}
+		foldCount = null,
+		foldExpanded = false,
+		foldEndTimestamp = null,
+		onActivate = () => {},
+		onToggleFold = () => {}
 	}: {
 		hit: LogHit;
 		columns: string[];
@@ -21,7 +26,11 @@
 		messageField?: string;
 		lineWrap?: boolean;
 		isAnchor?: boolean;
+		foldCount?: number | null;
+		foldExpanded?: boolean;
+		foldEndTimestamp?: string | null;
 		onActivate?: () => void;
+		onToggleFold?: () => void;
 	} = $props();
 
 	const cellWrap = $derived(
@@ -29,6 +38,9 @@
 	);
 	const messageWrap = $derived(lineWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-nowrap');
 	const rowWidth = $derived(lineWrap ? 'w-full' : 'w-max min-w-full');
+	const foldColumn = $derived(
+		messageField && columns.includes(messageField) ? messageField : columns[0]
+	);
 </script>
 
 <div
@@ -59,6 +71,15 @@
 			class="px-2 py-1 {column === messageField ? messageWrap : cellWrap}"
 			title={column === messageField || lineWrap ? undefined : cell}
 		>
+			{#if foldCount !== null && foldEndTimestamp !== null && column === foldColumn}
+				<FoldBadge
+					count={foldCount}
+					startTimestamp={hit.timestamp}
+					endTimestamp={foldEndTimestamp}
+					expanded={foldExpanded}
+					onToggle={onToggleFold}
+				/>
+			{/if}
 			{cell}
 		</span>
 	{/each}

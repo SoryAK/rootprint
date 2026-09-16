@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { Download } from 'lucide-svelte';
+	import { Download, ListCollapse } from 'lucide-svelte';
 	import ExportDialog from './ExportDialog.svelte';
 	import DisplaySettings from './DisplaySettings.svelte';
 	import type { SearchStore } from '$lib/stores/search.svelte';
@@ -32,6 +32,17 @@
 		<span>ms</span>
 	{/if}
 	<div class="ml-auto flex items-center gap-1">
+		<button
+			type="button"
+			class="btn btn-xs btn-square btn-ghost"
+			class:btn-active={store.foldEnabled}
+			aria-pressed={store.foldEnabled}
+			aria-label="Fold repetitive rows"
+			title="Fold repetitive rows"
+			onclick={() => store.toggleFoldEnabled()}
+		>
+			<ListCollapse class="h-4 w-4" />
+		</button>
 		<button
 			type="button"
 			class="btn btn-xs btn-square btn-ghost"

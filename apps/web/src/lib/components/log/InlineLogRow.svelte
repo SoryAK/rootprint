@@ -5,17 +5,26 @@
 	import { getByPath } from '$lib/utils/get-by-path';
 	import { formatCell } from '$lib/utils/column-width';
 	import { rowActivate } from '$lib/attachments/row-activate';
+	import FoldBadge from './FoldBadge.svelte';
 
 	let {
 		hit,
 		columns,
 		lineWrap = false,
-		onActivate = () => {}
+		foldCount = null,
+		foldExpanded = false,
+		foldEndTimestamp = null,
+		onActivate = () => {},
+		onToggleFold = () => {}
 	}: {
 		hit: LogHit;
 		columns: string[];
 		lineWrap?: boolean;
+		foldCount?: number | null;
+		foldExpanded?: boolean;
+		foldEndTimestamp?: string | null;
 		onActivate?: () => void;
+		onToggleFold?: () => void;
 	} = $props();
 
 	const parts = $derived(
@@ -40,6 +49,15 @@
 	<span class="absolute inset-y-px left-0 w-[3px] bg-[var(--level-color)]" aria-hidden="true"
 	></span>
 	<span class="sr-only">Severity: {hit.level.trim() || 'unknown'}. </span>
+	{#if foldCount !== null && foldEndTimestamp !== null}
+		<FoldBadge
+			count={foldCount}
+			startTimestamp={hit.timestamp}
+			endTimestamp={foldEndTimestamp}
+			expanded={foldExpanded}
+			onToggle={onToggleFold}
+		/>
+	{/if}
 	{#each parts as part, i (i)}{#if i > 0}<span class="px-2" aria-hidden="true">|</span
 			>{/if}{part}{/each}
 </div>

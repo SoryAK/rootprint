@@ -1,5 +1,6 @@
 import { goto } from '$app/navigation';
 import { page } from '$app/state';
+import { SvelteSet } from 'svelte/reactivity';
 import { toast } from 'svelte-sonner';
 import type {
 	FieldConfig,
@@ -18,7 +19,8 @@ import { fetchHistogram } from '$lib/api/histogram';
 import { loadFields } from '$lib/api/fields';
 import { getIndexConfig } from '$lib/api/indexes';
 import { getPreferences, setPreferences } from '$lib/api/preferences';
-import { buildQueryUrl } from '$lib/utils/query-params';
+import { buildQueryUrl, serialize } from '$lib/utils/query-params';
+import { foldConsecutiveHits, type LogListRow } from '$lib/utils/fold-hits';
 import { normalizeHit } from '$lib/utils/normalize-hit';
 import { readLastIndex, writeLastIndex, clearLastIndex } from '$lib/utils/last-index';
 import { resolveWindow } from '$lib/utils/time-range';
@@ -153,6 +155,35 @@ export class SearchStore {
 			return hit;
 		});
 	});
+
+	#expandedFolds = new SvelteSet<string>();
+	#autoSearchSig: string | null = null;
+
+	foldEnabled = $derived(page.url.searchParams.get('fold') === '1');
+
+	rows: LogListRow[] = $derived.by(() => {
+		const hits = this.logs;
+		if (!this.foldEnabled) return hits.map((hit) => ({ kind: 'hit' as const, hit }));
+		return foldConsecutiveHits(
+			hits,
+			this.activeFields,
+			this.fieldConfig?.timestampField,
+			this.#expandedFolds
+		);
+	});
+
+	toggleFoldEnabled(): void {
+		const params = new URLSearchParams(page.url.searchParams);
+		if (params.get('fold') === '1') params.delete('fold');
+		else params.set('fold', '1');
+		const str = params.toString();
+		goto(str ? `?${str}` : '?', { replaceState: true, keepFocus: true, noScroll: true });
+	}
+
+	toggleFold(id: string): void {
+		if (this.#expandedFolds.has(id)) this.#expandedFolds.delete(id);
+		else this.#expandedFolds.add(id);
+	}
 
 	#parsedQuery: () => ParsedQuery;
 	#indexes: () => IndexOption[];
@@ -377,7 +408,11 @@ export class SearchStore {
 				this.#loadActiveFields(active);
 			}
 
-			this.#runFreshSearch();
+			const searchSig = `${active}|${serialize(this.#parsedQuery()).toString()}`;
+			if (searchSig !== this.#autoSearchSig) {
+				this.#autoSearchSig = searchSig;
+				this.#runFreshSearch();
+			}
 
 			writeLastIndex(active);
 		});
@@ -456,6 +491,7 @@ export class SearchStore {
 				this.rawHits = [...this.rawHits, ...result.rawHits];
 			} else {
 				this.rawHits = result.rawHits;
+				this.#expandedFolds.clear();
 				this.hasSearched = true;
 				this.#onFreshSearch?.();
 			}
