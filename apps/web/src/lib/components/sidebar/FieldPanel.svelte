@@ -97,7 +97,7 @@
 	function fieldCacheKey(id: string, field: string): string {
 		const otherFilters = store.filters.filter((f) => f.field !== field);
 		const filtersKey = otherFilters.map(filterKey).join(',');
-		return `${id}|${store.query}|${serializeTimeRange(store.timeRange)}|${filtersKey}`;
+		return `${id}|${store.query}|${serializeTimeRange(store.timeRange)}|${filtersKey}|${store.refreshRevision}`;
 	}
 
 	const knownFieldNames = $derived(new Set(store.fields.map((f) => f.name)));
@@ -110,7 +110,7 @@
 		if (!id) return null;
 		const filtersKey = store.filters.map(filterKey).join(',');
 		const openKey = eligibleOpen.join(',');
-		return `${id}|${store.query}|${serializeTimeRange(store.timeRange)}|${filtersKey}|${openKey}`;
+		return `${id}|${store.query}|${serializeTimeRange(store.timeRange)}|${filtersKey}|${openKey}|${store.refreshRevision}`;
 	});
 
 	function runOrchestrator(signal: AbortSignal) {

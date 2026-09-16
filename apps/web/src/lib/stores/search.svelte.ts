@@ -56,6 +56,7 @@ export class SearchStore {
 	#lastBatchFull = $state(false);
 	searchError = $state<string | null>(null);
 	hasSearched = $state(false);
+	#refreshRevision = $state(0);
 
 	fieldConfig = $state<FieldConfig | null>(null);
 	configError = $state<string | null>(null);
@@ -106,7 +107,8 @@ export class SearchStore {
 	// The key match already implies a selected index and a loaded config: both are nulled with it.
 	fieldsReady = $derived(
 		!this.fieldsLoading &&
-			this.#fieldsLoadedFor === `${this.selectedIndex}|${serializeTimeRange(this.timeRange)}`
+			this.#fieldsLoadedFor ===
+				`${this.selectedIndex}|${serializeTimeRange(this.timeRange)}|${this.#refreshRevision}`
 	);
 
 	columnFields = $derived.by<LogField[]>(() => {
@@ -165,6 +167,7 @@ export class SearchStore {
 	#histogramAbort?: AbortController;
 	#histogramGuard = new RequestGuard();
 	#histogramFetchedFor: string | null = null;
+	#fieldsAbort?: AbortController;
 	#fieldsGuard = new RequestGuard();
 	#fieldsFetchedFor: string | null = null;
 	#activeFieldsGuard = new RequestGuard();
@@ -218,6 +221,11 @@ export class SearchStore {
 		return this.#snapshotEndTs;
 	}
 
+	/** Invalidates search-data caches when Run refreshes an unchanged query. */
+	get refreshRevision(): number {
+		return this.#refreshRevision;
+	}
+
 	navigateQuery(partial: Partial<ParsedQuery>, opts?: { push?: boolean }): void {
 		this.#searchAbort?.abort();
 		this.#histogramAbort?.abort();
@@ -226,6 +234,12 @@ export class SearchStore {
 	}
 
 	runQuery(query: string): void {
+		if (this.#disposed || this.selectedIndex === null) return;
+		if (query === this.query) {
+			this.#refreshRevision += 1;
+			this.#runFreshSearch(true);
+			return;
+		}
 		this.navigateQuery({ query }, { push: true });
 	}
 
@@ -363,9 +377,7 @@ export class SearchStore {
 				this.#loadActiveFields(active);
 			}
 
-			const timeWindow = resolveWindow(this.timeRange);
-			this.#runSearch(false, timeWindow);
-			this.#fetchHistogram(timeWindow);
+			this.#runFreshSearch();
 
 			writeLastIndex(active);
 		});
@@ -377,11 +389,17 @@ export class SearchStore {
 			const cfg = this.fieldConfig;
 			if (active === null || cfg === null) return;
 
-			const key = `${active}|${cfg.isOtel ? '1' : '0'}|${cfg.timestampField}|${cfg.messageField}|${serializeTimeRange(this.timeRange)}`;
+			const key = `${active}|${cfg.isOtel ? '1' : '0'}|${cfg.timestampField}|${cfg.messageField}|${serializeTimeRange(this.timeRange)}|${this.#refreshRevision}`;
 			if (key === this.#fieldsFetchedFor) return;
 			this.#fieldsFetchedFor = key;
 			this.#loadFields(active, cfg);
 		});
+	}
+
+	#runFreshSearch(forceHistogram = false): void {
+		const timeWindow = resolveWindow(this.timeRange);
+		void this.#runSearch(false, timeWindow);
+		void this.#fetchHistogram(timeWindow, forceHistogram);
 	}
 
 	async #runSearch(
@@ -485,16 +503,21 @@ export class SearchStore {
 		return this.#lastBatchFull ? 'more' : 'end';
 	}
 
-	async #fetchHistogram(timeWindow: { startTs: number; endTs: number }): Promise<void> {
+	async #fetchHistogram(
+		timeWindow: { startTs: number; endTs: number },
+		force = false
+	): Promise<void> {
 		if (this.#disposed) return;
 		if (this.selectedIndex === null) return;
 
 		const fetchKey = `${this.selectedIndex}|${this.composedQuery}|${timeWindow.startTs}|${timeWindow.endTs}`;
-		if (fetchKey === this.#histogramFetchedFor) {
+		if (!force && fetchKey === this.#histogramFetchedFor) {
 			this.#histogramAbort?.abort();
 			return;
 		}
 
+		// Counts are cleared below; only a completed request can be reused after that.
+		this.#histogramFetchedFor = null;
 		this.#histogramAbort?.abort();
 		const controller = new AbortController();
 		this.#histogramAbort = controller;
@@ -542,6 +565,7 @@ export class SearchStore {
 		this.fieldConfig = null;
 		this.#fieldsFetchedFor = null;
 		this.#fieldsLoadedFor = null;
+		this.#fieldsAbort?.abort();
 		this.#fieldsGuard.next();
 		this.fieldsLoading = false;
 		this.configError = null;
@@ -574,16 +598,26 @@ export class SearchStore {
 	}
 
 	async #loadFields(indexId: string, fieldConfig: FieldConfig): Promise<void> {
+		if (this.#disposed) return;
+		this.#fieldsAbort?.abort();
+		const controller = new AbortController();
+		this.#fieldsAbort = controller;
 		const requestId = this.#fieldsGuard.next();
-		const loadedFor = `${indexId}|${serializeTimeRange(this.timeRange)}`;
+		const loadedFor = `${indexId}|${serializeTimeRange(this.timeRange)}|${this.#refreshRevision}`;
 		this.fieldsLoading = true;
 		this.fieldsError = null;
 		try {
-			const fields = await loadFields(indexId, fieldConfig, resolveWindow(this.timeRange));
-			if (!this.#fieldsGuard.isCurrent(requestId)) return;
+			const fields = await loadFields(
+				indexId,
+				fieldConfig,
+				resolveWindow(this.timeRange),
+				controller.signal
+			);
+			if (controller.signal.aborted || !this.#fieldsGuard.isCurrent(requestId)) return;
 			this.#schemaFields = fields;
 			this.#fieldsLoadedFor = loadedFor;
 		} catch (e) {
+			if (isAbortError(e)) return;
 			if (!this.#fieldsGuard.isCurrent(requestId)) return;
 			this.fieldsError = e instanceof Error ? e.message : 'Failed to load fields';
 			this.#schemaFields = [];
@@ -673,6 +707,7 @@ export class SearchStore {
 		this.#disposed = true;
 		this.#searchAbort?.abort();
 		this.#histogramAbort?.abort();
+		this.#fieldsAbort?.abort();
 		const pending = this.#prefSave;
 		if (pending !== null) {
 			clearTimeout(pending.timer);

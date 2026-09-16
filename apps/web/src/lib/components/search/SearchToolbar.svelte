@@ -31,6 +31,7 @@
 	const unrun = $derived(queryInput !== store.query);
 
 	const valueCache = new Map<string, LogFieldValueBucket[]>();
+	let valueCacheRevision = -1;
 	let valueState = $state<{ key: string; buckets: LogFieldValueBucket[] } | null>(null);
 	let valueAbort: AbortController | null = null;
 
@@ -59,10 +60,16 @@
 		const t = token;
 		const id = store.selectedIndex;
 		if (t === null || t.kind !== 'value' || id === null) return null;
-		return `${id}|${t.field}|${store.composedQuery}|${serializeTimeRange(store.timeRange)}`;
+		return `${id}|${t.field}|${store.composedQuery}|${serializeTimeRange(store.timeRange)}|${store.refreshRevision}`;
 	});
 
 	$effect(() => {
+		const revision = store.refreshRevision;
+		if (revision !== valueCacheRevision) {
+			valueCache.clear();
+			valueCacheRevision = revision;
+		}
+		if (dismissed) return;
 		const key = valueFetchKey;
 		const t = token;
 		const id = store.selectedIndex;
@@ -192,9 +199,7 @@
 			void goto(traceDetailHref(raw, { index: store.selectedIndex, returnTo: page.url }));
 			return;
 		}
-		if (queryInput !== store.query) {
-			store.runQuery(queryInput);
-		}
+		store.runQuery(queryInput);
 	}
 
 	function shareLink() {
