@@ -9,12 +9,16 @@ const SYNTHETIC_FIELDS = new Set(['_dynamic', '_source']);
 export async function loadFields(
 	indexId: string,
 	fieldConfig: FieldConfig,
-	timeWindow: { startTs: number; endTs: number }
+	timeWindow: { startTs: number; endTs: number },
+	signal?: AbortSignal
 ): Promise<LogField[]> {
-	const res = await client.api.indexes[':indexId'].fields.$get({
-		param: { indexId },
-		query: { startTs: String(timeWindow.startTs), endTs: String(timeWindow.endTs) }
-	});
+	const res = await client.api.indexes[':indexId'].fields.$get(
+		{
+			param: { indexId },
+			query: { startTs: String(timeWindow.startTs), endTs: String(timeWindow.endTs) }
+		},
+		{ init: { signal } }
+	);
 	if (!res.ok) throw await readApiError(res, 'Failed to load fields');
 	const json = await res.json();
 
