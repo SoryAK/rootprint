@@ -20,10 +20,13 @@
 		viewport,
 		lineWrap = false,
 		displayMode = 'table',
+		foldGutter = false,
 		listEnd = 'more',
+		loadingMore = false,
 		onToggleSort = () => {},
 		onRowClick = () => {},
-		onToggleFold = () => {}
+		onToggleFold = () => {},
+		onLoadMore = () => {}
 	}: {
 		rows: LogListRow[];
 		activeFields: string[];
@@ -33,10 +36,13 @@
 		viewport: HTMLElement | null;
 		lineWrap?: boolean;
 		displayMode?: DisplayMode;
+		foldGutter?: boolean;
 		listEnd?: 'more' | 'end' | 'capped';
+		loadingMore?: boolean;
 		onToggleSort?: () => void;
 		onRowClick?: (hit: LogHit) => void;
 		onToggleFold?: (id: string) => void;
+		onLoadMore?: () => void;
 	} = $props();
 
 	let headerEl = $state<HTMLElement | null>(null);
@@ -46,11 +52,19 @@
 		count: rows.length,
 		getScrollElement: () => viewport,
 		estimateSize: () => ROW_ESTIMATE,
+		getItemKey: (index) => rowKey(rows[index], index),
 		overscan: OVERSCAN,
 		scrollMargin: 0
 	});
 
 	const messageField = $derived(fieldConfig?.messageField);
+	const foldGutterWidth = $derived.by(() => {
+		let digits = 1;
+		for (const row of rows) {
+			if (row.kind === 'fold') digits = Math.max(digits, String(row.count).length);
+		}
+		return `calc(${digits}ch + 1.5rem)`;
+	});
 
 	function measure(node: HTMLElement) {
 		get(virtualizer).measureElement(node);
@@ -72,21 +86,23 @@
 		return () => ro.disconnect();
 	});
 
-	$effect(() => {
-		const count = rows.length;
+	$effect.pre(() => {
+		const currentRows = rows;
 		const margin = scrollMargin;
 		const el = viewport;
 		const v = get(virtualizer);
 		v.setOptions({
-			count,
+			count: currentRows.length,
 			scrollMargin: margin,
 			getScrollElement: () => el,
-			estimateSize: () => ROW_ESTIMATE
+			estimateSize: () => ROW_ESTIMATE,
+			getItemKey: (index) => rowKey(currentRows[index], index),
+			overscan: OVERSCAN
 		});
 	});
 </script>
 
-<div class="w-fit min-w-full">
+<div class="w-fit min-w-full" style="--fold-gutter-width: {foldGutterWidth};">
 	{#if displayMode === 'table'}
 		<LogHeader
 			bind:el={headerEl}
@@ -95,6 +111,7 @@
 			{gridTemplate}
 			{sortDirection}
 			{lineWrap}
+			{foldGutter}
 			{onToggleSort}
 		/>
 	{/if}
@@ -102,6 +119,9 @@
 		{#each $virtualizer.getVirtualItems() as item (rowKey(rows[item.index], item.index))}
 			{#if rows[item.index]}
 				{@const row = rows[item.index]}
+				{@const fold = row.kind === 'fold' ? row : null}
+				{@const foldChild = row.kind === 'hit' && row.foldChild === true}
+				{@const toggleFold = () => fold && onToggleFold(fold.id)}
 				<div
 					{@attach measure}
 					data-index={item.index}
@@ -113,11 +133,10 @@
 							hit={row.hit}
 							columns={activeFields}
 							{lineWrap}
-							foldCount={row.kind === 'fold' ? row.count : null}
-							foldExpanded={row.kind === 'fold' ? row.expanded : false}
-							foldEndTimestamp={row.kind === 'fold' ? row.endHit.timestamp : null}
-							onActivate={() => (row.kind === 'fold' ? onToggleFold(row.id) : onRowClick(row.hit))}
-							onToggleFold={() => row.kind === 'fold' && onToggleFold(row.id)}
+							{foldChild}
+							{fold}
+							onActivate={() => onRowClick(row.hit)}
+							onToggleFold={toggleFold}
 						/>
 					{:else}
 						<LogRow
@@ -126,18 +145,34 @@
 							{gridTemplate}
 							{messageField}
 							{lineWrap}
-							foldCount={row.kind === 'fold' ? row.count : null}
-							foldExpanded={row.kind === 'fold' ? row.expanded : false}
-							foldEndTimestamp={row.kind === 'fold' ? row.endHit.timestamp : null}
-							onActivate={() => (row.kind === 'fold' ? onToggleFold(row.id) : onRowClick(row.hit))}
-							onToggleFold={() => row.kind === 'fold' && onToggleFold(row.id)}
+							{foldGutter}
+							{foldChild}
+							{fold}
+							onActivate={() => onRowClick(row.hit)}
+							onToggleFold={toggleFold}
 						/>
 					{/if}
 				</div>
 			{/if}
 		{/each}
 	</div>
-	{#if listEnd !== 'more'}
+	{#if listEnd === 'more'}
+		<div class="border-line sticky left-0 w-fit border-t px-3 py-3">
+			<button
+				type="button"
+				class="btn btn-ghost btn-xs"
+				disabled={loadingMore}
+				onclick={onLoadMore}
+			>
+				{#if loadingMore}
+					<span class="loading loading-spinner loading-xs" aria-hidden="true"></span>
+					Loading more
+				{:else}
+					Load more
+				{/if}
+			</button>
+		</div>
+	{:else}
 		<div class="border-line text-muted sticky left-0 w-fit border-t px-3 py-4 text-xs">
 			{#if listEnd === 'capped'}
 				Showing the first 10,000 logs. Narrow the time range to see the rest.

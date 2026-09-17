@@ -6,7 +6,7 @@ All notable changes to Rootprint are documented here. The format follows [Keep a
 
 ### Added
 
-- Optional fold mode on the log explorer: consecutive rows that match on every visible column except timestamp collapse behind a count and time-span badge (`fold=1` in the URL). Display-only; histogram, hit count, and the search query are unchanged.
+- Optional fold mode on the log explorer: consecutive rows that match on every visible column except timestamp collapse behind a count badge (`fold=1` in the URL). Display-only; histogram, hit count, and the search query are unchanged.
 
 ## [0.4.3] - 2026-09-10
 

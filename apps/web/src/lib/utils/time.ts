@@ -1,12 +1,4 @@
-import {
-	format,
-	formatDistanceToNow,
-	getUnixTime,
-	isSameDay,
-	isValid,
-	parse,
-	parseISO
-} from 'date-fns';
+import { format, formatDistanceToNow, getUnixTime, isValid, parse, parseISO } from 'date-fns';
 
 /** "HH:MM" */
 export function formatChartTime(tsSec: number): string {
@@ -27,29 +19,6 @@ export function formatChartTooltip(tsSec: number): string {
 export function formatLogRowTimestamp(iso: string): string {
 	const d = parseISO(iso);
 	return isValid(d) ? format(d, 'yyyy-MM-dd HH:mm:ss.SSS') : '—';
-}
-
-/** Compact clock for a fold badge. Same calendar day as `other` → time only. */
-function formatFoldClock(iso: string, otherIso: string): string | null {
-	const d = parseISO(iso);
-	const other = parseISO(otherIso);
-	if (!isValid(d)) return null;
-	if (isValid(other) && !isSameDay(d, other)) {
-		return format(d, 'MM-dd HH:mm:ss');
-	}
-	return format(d, 'HH:mm:ss');
-}
-
-/** Chronological first–last clocks, or null when they match to the second. */
-export function formatFoldSpan(startIso: string, endIso: string): string | null {
-	const a = parseISO(startIso);
-	const b = parseISO(endIso);
-	if (!isValid(a) || !isValid(b)) return null;
-	const [from, to] = a.getTime() <= b.getTime() ? [startIso, endIso] : [endIso, startIso];
-	const fromClock = formatFoldClock(from, to);
-	const toClock = formatFoldClock(to, from);
-	if (fromClock === null || toClock === null || fromClock === toClock) return null;
-	return `${fromClock}–${toClock}`;
 }
 
 /** "YYYY-MM-DD HH:MM:SS" — second precision, used in the activity tables. */

@@ -23,6 +23,7 @@ export function rowActivate(getOnActivate: () => () => void): Attachment<HTMLEle
 		}
 
 		function handleKeyDown(event: KeyboardEvent) {
+			if (event.target !== node) return;
 			if (event.key === 'Enter' || event.key === ' ') {
 				event.preventDefault();
 				getOnActivate()();

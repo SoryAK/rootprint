@@ -34,12 +34,11 @@
 	<div class="ml-auto flex items-center gap-1">
 		<button
 			type="button"
-			class="btn btn-xs btn-square btn-ghost"
-			class:btn-active={store.foldEnabled}
+			class={['btn btn-xs btn-square', store.foldEnabled ? 'btn-primary' : 'btn-ghost']}
 			aria-pressed={store.foldEnabled}
-			aria-label="Fold repetitive rows"
-			title="Fold repetitive rows"
-			onclick={() => store.toggleFoldEnabled()}
+			aria-label="Fold repeats"
+			title="Fold repeats"
+			onclick={() => store.setFoldEnabled(!store.foldEnabled)}
 		>
 			<ListCollapse class="h-4 w-4" />
 		</button>

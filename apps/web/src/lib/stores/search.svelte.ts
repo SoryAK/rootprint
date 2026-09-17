@@ -20,7 +20,7 @@ import { loadFields } from '$lib/api/fields';
 import { getIndexConfig } from '$lib/api/indexes';
 import { getPreferences, setPreferences } from '$lib/api/preferences';
 import { buildQueryUrl, serialize } from '$lib/utils/query-params';
-import { foldConsecutiveHits, type LogListRow } from '$lib/utils/fold-hits';
+import { foldRuns, groupConsecutiveHits, type LogListRow } from '$lib/utils/fold-hits';
 import { normalizeHit } from '$lib/utils/normalize-hit';
 import { readLastIndex, writeLastIndex, clearLastIndex } from '$lib/utils/last-index';
 import { resolveWindow } from '$lib/utils/time-range';
@@ -161,23 +161,22 @@ export class SearchStore {
 
 	foldEnabled = $derived(page.url.searchParams.get('fold') === '1');
 
+	// Keyed separately from expansion so toggling one fold doesn't re-key every hit.
+	#runs = $derived(
+		this.foldEnabled
+			? groupConsecutiveHits(this.logs, this.activeFields, this.fieldConfig?.timestampField)
+			: null
+	);
+
 	rows: LogListRow[] = $derived.by(() => {
-		const hits = this.logs;
-		if (!this.foldEnabled) return hits.map((hit) => ({ kind: 'hit' as const, hit }));
-		return foldConsecutiveHits(
-			hits,
-			this.activeFields,
-			this.fieldConfig?.timestampField,
-			this.#expandedFolds
-		);
+		const runs = this.#runs;
+		if (runs === null) return this.logs.map((hit) => ({ kind: 'hit' as const, hit }));
+		return foldRuns(runs, this.#expandedFolds);
 	});
 
-	toggleFoldEnabled(): void {
-		const params = new URLSearchParams(page.url.searchParams);
-		if (params.get('fold') === '1') params.delete('fold');
-		else params.set('fold', '1');
-		const str = params.toString();
-		goto(str ? `?${str}` : '?', { replaceState: true, keepFocus: true, noScroll: true });
+	setFoldEnabled(next: boolean): void {
+		const url = buildQueryUrl(page.url.searchParams, {}, next);
+		goto(url, { replaceState: true, keepFocus: true, noScroll: true });
 	}
 
 	toggleFold(id: string): void {
@@ -260,6 +259,8 @@ export class SearchStore {
 	navigateQuery(partial: Partial<ParsedQuery>, opts?: { push?: boolean }): void {
 		this.#searchAbort?.abort();
 		this.#histogramAbort?.abort();
+		// Re-search even when the URL is unchanged; only the fold toggle skips it.
+		this.#autoSearchSig = null;
 		const url = buildQueryUrl(page.url.searchParams, partial);
 		goto(url, { replaceState: !opts?.push, keepFocus: true, noScroll: true });
 	}
@@ -533,6 +534,10 @@ export class SearchStore {
 		void this.#runSearch(true);
 	}
 
+	get loadingMore(): boolean {
+		return this.#prefetching;
+	}
+
 	get listEnd(): 'more' | 'end' | 'capped' {
 		if (this.numHits !== null && this.rawHits.length >= this.numHits) return 'end';
 		if (this.rawHits.length >= MAX_OFFSET) return 'capped';
@@ -688,6 +693,8 @@ export class SearchStore {
 
 	setActiveFields(next: string[]): void {
 		this.#savedFields = next;
+		// Fold ids are positional, so a column change regroups runs and invalidates them.
+		this.#expandedFolds.clear();
 		this.#savePrefs();
 	}
 

@@ -5,7 +5,8 @@
 	import { getByPath } from '$lib/utils/get-by-path';
 	import { formatCell } from '$lib/utils/column-width';
 	import { rowActivate } from '$lib/attachments/row-activate';
-	import FoldBadge from './FoldBadge.svelte';
+	import type { FoldSummaryRow } from '$lib/utils/fold-hits';
+	import FoldGutter from './FoldGutter.svelte';
 
 	let {
 		hit,
@@ -14,9 +15,9 @@
 		messageField,
 		lineWrap = false,
 		isAnchor = false,
-		foldCount = null,
-		foldExpanded = false,
-		foldEndTimestamp = null,
+		foldGutter = false,
+		foldChild = false,
+		fold = null,
 		onActivate = () => {},
 		onToggleFold = () => {}
 	}: {
@@ -26,9 +27,9 @@
 		messageField?: string;
 		lineWrap?: boolean;
 		isAnchor?: boolean;
-		foldCount?: number | null;
-		foldExpanded?: boolean;
-		foldEndTimestamp?: string | null;
+		foldGutter?: boolean;
+		foldChild?: boolean;
+		fold?: FoldSummaryRow | null;
 		onActivate?: () => void;
 		onToggleFold?: () => void;
 	} = $props();
@@ -38,9 +39,6 @@
 	);
 	const messageWrap = $derived(lineWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-nowrap');
 	const rowWidth = $derived(lineWrap ? 'w-full' : 'w-max min-w-full');
-	const foldColumn = $derived(
-		messageField && columns.includes(messageField) ? messageField : columns[0]
-	);
 </script>
 
 <div
@@ -51,7 +49,9 @@
 	class={[
 		'border-line grid min-h-[25px] items-stretch border-b text-left font-mono text-xs hover:bg-[color-mix(in_oklab,var(--level-color)_14%,transparent)]',
 		rowWidth,
-		isAnchor && 'bg-[color-mix(in_oklab,var(--level-color)_10%,transparent)]'
+		isAnchor && 'bg-[color-mix(in_oklab,var(--level-color)_10%,transparent)]',
+		fold?.expanded && 'bg-base-200/70',
+		foldChild && 'bg-base-200/30'
 	]}
 	style="grid-template-columns: {gridTemplate}; --level-color: {levelColor(hit.level)};"
 	{@attach rowActivate(() => onActivate)}
@@ -62,6 +62,9 @@
 		style="background-color: var(--level-color);"
 		><span class="sr-only">Severity: {hit.level.trim() || 'unknown'}. </span></span
 	>
+	{#if foldGutter}
+		<FoldGutter {fold} child={foldChild} onToggle={onToggleFold} />
+	{/if}
 	<span class="text-muted px-2 py-1" title={hit.timestamp}>
 		{formatLogRowTimestamp(hit.timestamp)}
 	</span>
@@ -71,15 +74,6 @@
 			class="px-2 py-1 {column === messageField ? messageWrap : cellWrap}"
 			title={column === messageField || lineWrap ? undefined : cell}
 		>
-			{#if foldCount !== null && foldEndTimestamp !== null && column === foldColumn}
-				<FoldBadge
-					count={foldCount}
-					startTimestamp={hit.timestamp}
-					endTimestamp={foldEndTimestamp}
-					expanded={foldExpanded}
-					onToggle={onToggleFold}
-				/>
-			{/if}
 			{cell}
 		</span>
 	{/each}

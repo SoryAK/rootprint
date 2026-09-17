@@ -8,6 +8,7 @@
 		gridTemplate,
 		sortDirection,
 		lineWrap = false,
+		foldGutter = false,
 		onToggleSort = () => {},
 		el = $bindable(null)
 	}: {
@@ -16,6 +17,7 @@
 		gridTemplate: string;
 		sortDirection: SortDirection;
 		lineWrap?: boolean;
+		foldGutter?: boolean;
 		onToggleSort?: () => void;
 		el?: HTMLElement | null;
 	} = $props();
@@ -29,6 +31,7 @@
 	style="grid-template-columns: {gridTemplate}; background-color: color-mix(in oklab, var(--color-base-200) 30%, var(--color-base-100));"
 >
 	<span aria-hidden="true"></span>
+	{#if foldGutter}<span aria-hidden="true"></span>{/if}
 	<button
 		type="button"
 		class="hover:text-base-content text-ui flex items-center gap-1 px-2 py-1.5 text-left font-sans"
